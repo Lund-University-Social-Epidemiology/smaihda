@@ -1,4 +1,4 @@
-# Simple-Means MAIHDA in R (v1.9.0, 6 October 2026)
+# Simple-Means MAIHDA in R (v1.10.0, 16 October 2026)
 # ==================================================================
 # Twin of the Python implementation (S5 Text). Base R only. Reproduces every
 # simple-means measure of the paper from its stratum table (S5 File) or from
@@ -9,7 +9,40 @@
 # bootstrap confidence intervals (contexts fixed, individuals resampled), and,
 # new in v1.5.0, Step 4 (deviation of each cell from its area with a
 # Wilson-shift interval) and the minn rule for the size-standardised measures.
-# The Stata command smaihda v1.9.0 gives the same point estimates.
+# The Stata command smaihda v1.10.0 gives the same point estimates.
+#
+# v1.10.0 (16 October 2026): survey weights, as an option. It is the only
+# difference from v1.9.0; without weights every number is the v1.9.0 number.
+# With weights the size of a cell has two roles, and they are separated.
+#   - Composition. A cell enters every weighted mean (the crude proportions of
+#     the area and of the population, the crude VPC, the AUC, the
+#     classification) with the sum of its weights, rescaled so that the sizes
+#     add up to the analytical N. Its proportion is sum(w*y)/sum(w).
+#   - Noise. The binomial noise of a weighted proportion is p(1-p)/n_ef, where
+#     n_ef is its effective size by linearisation, p(1-p)/Var(p) with
+#     Var(p) = [(1-p)^2 * sum_cases w^2 + p^2 * sum_noncases w^2] / (sum w)^2
+#     (neff_lin). It carries the inequality of the weights and their
+#     association with the outcome. In a cell with no cases or no non-cases it
+#     falls back on Kish's (sum w)^2/sum(w^2). n_ef replaces n in the noise
+#     term of the corrected components (decompose, three_way), in the
+#     Wilson interval of every cell (Step 4), and in the binomial draws of the
+#     within-context bootstrap, Binomial(round(n_ef), p)/round(n_ef). The
+#     contexts stay fixed and only the individuals are resampled.
+#   - The minn rule applies to the individuals observed in the cell, n, as
+#     without weights: the weighted analysis is a sensitivity analysis and
+#     keeps the cells of the unweighted one; n does not change between
+#     replicates, so no cell enters and leaves the standardised block; and the
+#     smaller information of a weighted cell already enters the noise term and
+#     the intervals through n_ef.
+# Without weights n_ef = n and the composition size is n, so nothing moves,
+# intervals included. n_ef does not capture clustering or stratification of
+# the sample design, which would need the primary sampling units.
+# Option: weights=<prefix> reads <prefix>_sum, <prefix>_cases, <prefix>_sq_cases
+# and <prefix>_sq_noncases of the stratum table;
+# weights=<sum>,<cases>,<sq_cases>,<sq_noncases> names the four columns; with
+# individual records weights=<column> names the weight variable. The table is
+# still recognised from its columns. Same option and same arithmetic as the
+# Python twin v1.10.0.
 #
 # v1.9.0 (6 October 2026): coAUC*EAR, the area-level contextual AUC
 # standardised for size and composition. The area-level coAUC* (auc_area_std)
@@ -88,21 +121,25 @@
 # Input : CSV with columns area, strata_sociodem_id, strata_global_id and
 #         one 0/1 column per outcome (rows with a missing outcome are dropped),
 #         or the stratum table, one row per stratum and outcome with area,
-#         strata_sociodem_id, strata_global_id, outcome, n and cases (from v1.8.0).
-# Run   : Rscript S3_File_smaihda_R.R dataset-smaihda_stratum_table.csv psycmed private [minn=10] [B=2000] [seed=2026]
-#         (arguments: file, outcome names, optional minn=, B= and seed= tokens)
+#         strata_sociodem_id, strata_global_id, outcome, n and cases (from v1.8.0);
+#         with weights, also the sum of weights, the weighted cases and the sums
+#         of squared weights over the cases and the non-cases (v1.10.0).
+# Run   : Rscript S3_File_smaihda_R.R dataset-smaihda_stratum_table.csv psycmed private [minn=10] [B=2000] [seed=2026] [weights=...]
+#         (arguments: file, outcome names, optional minn=, B=, seed= and weights= tokens)
 
 args <- commandArgs(trailingOnly = TRUE)
-opt  <- args[grepl("^(minn|B|seed)=", args)]
-args <- args[!grepl("^(minn|B|seed)=", args)]
+opt  <- args[grepl("^(minn|B|seed|weights)=", args)]
+args <- args[!grepl("^(minn|B|seed|weights)=", args)]
 CSV      <- if (length(args) >= 1) args[1] else "dataset-smaihda_stratum_table.csv"
 OUTCOMES <- if (length(args) >= 2) args[-1] else c("psycmed", "private")
 SEED <- 2026; B <- 2000; MINN <- 10
+WEIGHTS <- NULL   # v1.10.0: NULL = unweighted, exactly v1.9.0
 for (o in opt) {
   kv <- strsplit(o, "=")[[1]]
   if (kv[1] == "minn") MINN <- as.integer(kv[2])
   if (kv[1] == "B")    B    <- as.integer(kv[2])
   if (kv[1] == "seed") SEED <- as.integer(kv[2])
+  if (kv[1] == "weights") WEIGHTS <- kv[2]
 }
 if (nzchar(Sys.getenv("SMAIHDA_B"))) B <- as.integer(Sys.getenv("SMAIHDA_B"))
 
@@ -175,8 +212,91 @@ per_cell <- function(d, outcome) {
        n = n, ev = ev, p = ev / n)
 }
 
+# v1.10.0: the weight columns. For the stratum table, a prefix gives
+# <prefix>_sum, <prefix>_cases, <prefix>_sq_cases and <prefix>_sq_noncases, and
+# four names separated by commas give them explicitly. For individual records,
+# the weight column.
+weight_columns <- function(d, weights) {
+  if (is_table(d)) {
+    cols <- if (grepl(",", weights)) strsplit(weights, ",")[[1]]
+            else paste0(weights, c("_sum", "_cases", "_sq_cases", "_sq_noncases"))
+    if (length(cols) != 4) stop("weights= needs a prefix or four columns: sum,cases,sq_cases,sq_noncases")
+  } else cols <- weights
+  miss <- setdiff(cols, names(d))
+  if (length(miss)) stop(sprintf("weights=%s: column(s) %s not in the data", weights, paste(miss, collapse = ", ")))
+  cols
+}
+
+# v1.10.0: one row per A-SD cell with survey weights, in the order of per_cell.
+#   p     weighted proportion, sum(w*y)/sum(w)
+#   n     composition size, sum(w) rescaled so that the cells add up to the
+#         analytical N (the number of individuals with the outcome)
+#   ev    p*n, the weighted events on that scale
+#   ne    effective size of the weighted proportion, by linearisation
+#         (neff_lin), which sets its binomial noise
+#   n_obs individuals observed in the cell
+per_cell_w <- function(d, outcome, weights) {
+  cols <- weight_columns(d, weights)
+  if (is_table(d)) {
+    t <- d[d$outcome == outcome & d$n > 0, ]
+    key <- cell_key(t)
+    nob <- as.numeric(t$n); kob <- as.numeric(t$cases)
+    w1 <- as.numeric(t[[cols[1]]]); wy <- as.numeric(t[[cols[2]]])
+    s1 <- as.numeric(t[[cols[3]]]); s0 <- as.numeric(t[[cols[4]]])
+  } else {
+    t <- d[!is.na(d[[outcome]]), ]
+    key <- as.character(t$strata_global_id)
+    w <- as.numeric(t[[cols[1]]]); y <- as.numeric(t[[outcome]])
+    nob <- rep(1, nrow(t)); kob <- y; w1 <- w; wy <- w * y
+    s1 <- w * w * y; s0 <- w * w * (1 - y)
+  }
+  first <- !duplicated(key)
+  ids <- key[first]
+  ka <- suppressWarnings(as.numeric(t$area[first]))
+  kd <- suppressWarnings(as.numeric(t$strata_sociodem_id[first]))
+  if (any(is.na(ka)) || any(is.na(kd))) {
+    o <- order(as.character(t$area[first]), as.character(t$strata_sociodem_id[first]))
+  } else {
+    o <- order(ka, kd)
+  }
+  ids <- ids[o]
+  m <- match(key, ids)
+  n_obs <- as.numeric(rowsum(nob, m)[, 1])
+  k_obs <- as.numeric(rowsum(kob, m)[, 1])
+  W  <- as.numeric(rowsum(w1, m)[, 1])
+  WY <- as.numeric(rowsum(wy, m)[, 1])
+  S1 <- as.numeric(rowsum(s1, m)[, 1])
+  S0 <- as.numeric(rowsum(s0, m)[, 1])
+  if (any(W <= 0) || any(S1 + S0 <= 0)) stop(sprintf("weights=%s: every cell needs a positive sum of weights", weights))
+  p <- WY / W
+  n <- W / sum(W) * sum(n_obs)
+  list(area = as.character(t$area[first])[o],
+       sd   = as.character(t$strata_sociodem_id[first])[o],
+       n = n, ev = p * n, p = p, ne = neff_lin(W, WY, S1, S0, k_obs, n_obs), n_obs = n_obs)
+}
+
+# v1.10.0: effective size of a weighted proportion, by linearisation. With
+# p = sum(w*y)/W, Var(p) = [(1 - p)^2 * S1 + p^2 * S0] / W^2 (S1, S0 = sums of
+# w^2 over the cases and the non-cases), and n_ef = p(1 - p)/Var(p). With all
+# weights equal, n_ef = n. In a cell with no cases or no non-cases (counted in
+# individuals) Var(p) is zero, and n_ef falls back on Kish's (sum w)^2/sum(w^2).
+# Same rule as the Python twin.
+neff_lin <- function(W, WY, S1, S0, k_obs, n_obs) {
+  ne <- W * W / (S1 + S0)
+  i <- k_obs > 0 & k_obs < n_obs
+  p <- WY[i] / W[i]
+  v <- ((1 - p)^2 * S1[i] + p^2 * S0[i]) / (W[i]^2)
+  ne[i] <- p * (1 - p) / v
+  ne
+}
+
 # ---- variance decomposition (weighted on all cells; standardised on n >= minn)
-decompose <- function(area, n, p, minn = MINN) {
+# v1.10.0: ne is the effective size of every cell (neff_lin), used for the binomial
+# noise; nobs the individuals observed, used for the minn rule; n is the
+# composition size. Without weights both are n.
+decompose <- function(area, n, p, minn = MINN, ne = NULL, nobs = NULL) {
+  if (is.null(ne)) ne <- n
+  if (is.null(nobs)) nobs <- n
   N <- sum(n)
   areas <- unique(area)
   n_a   <- tapply(n, area, sum)[areas]
@@ -186,9 +306,9 @@ decompose <- function(area, n, p, minn = MINN) {
   V_SD <- sum(n * (p - p_a_w[area])^2) / N
   V_I  <- sum(n * p * (1 - p)) / N
   # v1.5.0: size-standardised block on the cells with n >= minn
-  k <- n >= minn
+  k <- nobs >= minn
   K_all <- length(p); K <- sum(k)
-  as <- area[k]; ns <- n[k]; ps <- p[k]
+  as <- area[k]; ns <- ne[k]; ps <- p[k]
   areas_s <- unique(as)
   p_a_s  <- tapply(ps, as, mean)[areas_s]
   pbar_s <- mean(ps)
@@ -228,11 +348,13 @@ coefficients_sm <- function(d) {
 }
 
 # ---- Step 4: deviation from the crude area proportion, Wilson shift -----
-deviations_sm <- function(area, n, ev) {
+# v1.10.0: with weights, the Wilson interval of a cell uses its effective size
+# ne, and the area proportion is the weighted one.
+deviations_sm <- function(area, n, ev, ne = NULL) {
   p <- ev / n
   n_a <- tapply(n, area, sum); ev_a <- tapply(ev, area, sum)
   pA <- as.numeric((ev_a / n_a)[area])
-  w <- wilson(ev, n)
+  w <- if (is.null(ne)) wilson(ev, n) else wilson(p * ne, ne)
   dev <- p - pA; lo <- w$lo - pA; hi <- w$hi - pA
   list(dev = dev, lo = lo, hi = hi, sig = (lo > 0) | (hi < 0))
 }
@@ -266,23 +388,24 @@ auc_area <- function(area, n, p) {
 # v1.6.2: the cells with n < minn are excluded, as in every other measure that
 # counts cells rather than individuals. One rule, no exceptions: a measure that
 # counts cells applies minn, a measure that counts individuals uses them all.
-auc_std <- function(n, p, minn = MINN) {
-  keep <- n >= minn
+# v1.10.0: with weights, minn applies to nobs, the individuals observed.
+auc_std <- function(n, p, minn = MINN, nobs = NULL) {
+  keep <- (if (is.null(nobs)) n else nobs) >= minn
   auc_sm(rep(1, sum(keep)), p[keep])
 }
 
-auc_area_std <- function(area, n, p, minn = MINN) {
-  keep <- n >= minn
+auc_area_std <- function(area, n, p, minn = MINN, nobs = NULL) {
+  keep <- (if (is.null(nobs)) n else nobs) >= minn
   a <- area[keep]; nn <- n[keep]; pp <- p[keep]
   areas <- unique(a)
   p_a <- as.numeric((tapply(nn * pp, a, sum) / tapply(nn, a, sum))[areas])
   auc_sm(rep(1, length(p_a)), p_a)
 }
 
-auc_area_ear <- function(area, n, p, minn = MINN) {
+auc_area_ear <- function(area, n, p, minn = MINN, nobs = NULL) {
   # v1.9.0: coAUC*EAR, every area counted once and scored by its EAR, the plain
-  # mean of the proportions of its cells with n >= minn
-  keep <- n >= minn
+  # mean of the proportions of its cells with n >= minn (v1.10.0: nobs with weights)
+  keep <- (if (is.null(nobs)) n else nobs) >= minn
   ear <- tapply(p[keep], area[keep], mean)
   auc_sm(rep(1, length(ear)), as.numeric(ear))
 }
@@ -299,8 +422,11 @@ classify_sm <- function(n, p, threshold) {
 }
 
 # ---- contextual split CCI / G / CMI (cells with n >= minn) --------------
-three_way <- function(area, sd, n, p, minn = MINN) {
-  k <- n >= minn
+three_way <- function(area, sd, n, p, minn = MINN, ne = NULL, nobs = NULL) {
+  # v1.10.0: with weights, the noise uses the effective size ne and the minn
+  # rule the individuals observed, nobs
+  k <- (if (is.null(nobs)) n else nobs) >= minn
+  if (!is.null(ne)) n <- ne
   area <- area[k]; sd <- sd[k]; n <- n[k]; p <- p[k]
   areas <- unique(area); A <- length(areas); S <- length(unique(sd)); K <- length(p)
   pa  <- tapply(p, area, mean); m <- mean(p)
@@ -337,23 +463,28 @@ BOOT_KEYS <- c("VPC_A","VPC_SD","VPC_ASD","GCCI","VPC_A_s","VPC_SD_s","VPC_ASD_s
 # the estimate by one dose while its spread is the sampling spread. The
 # interval is the percentile interval recentred on the estimate, truncated to
 # the admissible range of the measure (the boundary rule).
-bootstrap_sm <- function(area, sd, n, p, seed = SEED, nboot = B) {
+# v1.10.0: with weights, the events of a cell are drawn from
+# Binomial(round(ne), p), so that a replicate carries the noise of the weighted
+# proportion, and every measure is recomputed with the composition sizes n.
+# Without weights ne is n and the stream is that of v1.9.0.
+bootstrap_sm <- function(area, sd, n, p, seed = SEED, nboot = B, ne = NULL, nobs = NULL) {
   set.seed(seed)
   keys <- BOOT_KEYS
   store <- matrix(NA_real_, nboot, length(keys), dimnames = list(NULL, keys))
-  ni <- as.integer(round(n))
+  ni <- as.integer(round(if (is.null(ne)) n else ne))
   for (b in seq_len(nboot)) {
     pp <- rbinom(length(ni), ni, p) / ni
-    cf <- coefficients_sm(decompose(area, n, pp))
-    tw <- three_way(area, sd, n, pp)
+    cf <- coefficients_sm(decompose(area, n, pp, ne = ne, nobs = nobs))
+    tw <- three_way(area, sd, n, pp, ne = ne, nobs = nobs)
     store[b, ] <- c(unlist(cf[keys[1:12]]), auc_sm(n, pp), auc_area(area, n, pp),
-                    auc_std(n, pp), auc_area_std(area, n, pp), tw, auc_area_ear(area, n, pp))
+                    auc_std(n, pp, nobs = nobs), auc_area_std(area, n, pp, nobs = nobs), tw,
+                    auc_area_ear(area, n, pp, nobs = nobs))
   }
   # point estimates on the observed data, for the recentring
-  cf0 <- coefficients_sm(decompose(area, n, p))
+  cf0 <- coefficients_sm(decompose(area, n, p, ne = ne, nobs = nobs))
   est <- c(unlist(cf0[keys[1:12]]), auc_sm(n, p), auc_area(area, n, p),
-           auc_std(n, p), auc_area_std(area, n, p),
-           three_way(area, sd, n, p), auc_area_ear(area, n, p))
+           auc_std(n, p, nobs = nobs), auc_area_std(area, n, p, nobs = nobs),
+           three_way(area, sd, n, p, ne = ne, nobs = nobs), auc_area_ear(area, n, p, nobs = nobs))
   names(est) <- keys
   qs <- apply(store, 2, quantile, probs = c(0.025, 0.975), na.rm = TRUE, type = 7)
   mn <- apply(store, 2, mean, na.rm = TRUE)
@@ -381,17 +512,21 @@ resample_areas <- function(area) {
   list(idx = idx, area = newarea)
 }
 
-bootstrap_cluster <- function(area, sd, n, p, seed = SEED, nboot = B) {
+# v1.10.0: ne, the effective sizes, travel with their cells.
+bootstrap_cluster <- function(area, sd, n, p, seed = SEED, nboot = B, ne = NULL, nobs = NULL) {
   set.seed(seed)
   keys <- BOOT_KEYS
   store <- matrix(NA_real_, nboot, length(keys), dimnames = list(NULL, keys))
   for (b in seq_len(nboot)) {
     r <- resample_areas(area)
     aa <- r$area; nn <- n[r$idx]; pp <- p[r$idx]; ss <- sd[r$idx]
-    cf <- coefficients_sm(decompose(aa, nn, pp))
-    tw <- three_way(aa, ss, nn, pp)
+    ee <- if (is.null(ne)) NULL else ne[r$idx]
+    oo <- if (is.null(nobs)) NULL else nobs[r$idx]
+    cf <- coefficients_sm(decompose(aa, nn, pp, ne = ee, nobs = oo))
+    tw <- three_way(aa, ss, nn, pp, ne = ee, nobs = oo)
     store[b, ] <- c(unlist(cf[keys[1:12]]), auc_sm(nn, pp), auc_area(aa, nn, pp),
-                    auc_std(nn, pp), auc_area_std(aa, nn, pp), tw, auc_area_ear(aa, nn, pp))
+                    auc_std(nn, pp, nobs = oo), auc_area_std(aa, nn, pp, nobs = oo), tw,
+                    auc_area_ear(aa, nn, pp, nobs = oo))
   }
   apply(store, 2, quantile, probs = c(0.025, 0.975), na.rm = TRUE, type = 7)
 }
@@ -399,37 +534,47 @@ bootstrap_cluster <- function(area, sd, n, p, seed = SEED, nboot = B) {
 # ---- main ---------------------------------------------------------------
 main <- function() {
   d <- read.csv(CSV, stringsAsFactors = FALSE)
-  cat(sprintf("smaihda R v1.9.0 | minn = %d | B = %d | seed = %d\n", MINN, B, SEED))
+  wtxt <- if (is.null(WEIGHTS)) "" else
+    sprintf(" | weights = %s (noise from the linearised n_ef)", paste(weight_columns(d, WEIGHTS), collapse = ", "))
+  cat(sprintf("smaihda R v1.10.0 | minn = %d | B = %d | seed = %d%s\n", MINN, B, SEED, wtxt))
   cat(sprintf("STEP 1  Data verification: N=%d  areas=%d  strata=%d\n",
               if (is_table(d)) as.integer(table_n(d)) else nrow(d),
               length(unique(d$area)), length(unique(d$strata_global_id))))
   for (out in OUTCOMES) {
-    cl0 <- per_cell(d, out)
+    if (is.null(WEIGHTS)) {
+      cl0 <- per_cell(d, out); ne <- NULL; n_obs <- cl0$n; nobs <- NULL
+    } else {
+      cl0 <- per_cell_w(d, out, WEIGHTS); ne <- cl0$ne; n_obs <- cl0$n_obs; nobs <- n_obs
+    }
     area <- cl0$area; sd <- cl0$sd; n <- cl0$n; ev <- cl0$ev; p <- cl0$p
-    dd <- decompose(area, n, p); cf <- coefficients_sm(dd)
+    dd <- decompose(area, n, p, ne = ne, nobs = nobs); cf <- coefficients_sm(dd)
     A <- auc_sm(n, p); Aa <- auc_area(area, n, p)
-    As <- auc_std(n, p); Aas <- auc_area_std(area, n, p); Aae <- auc_area_ear(area, n, p)
-    ci <- bootstrap_sm(area, sd, n, p)
+    As <- auc_std(n, p, nobs = nobs); Aas <- auc_area_std(area, n, p, nobs = nobs); Aae <- auc_area_ear(area, n, p, nobs = nobs)
+    ci <- bootstrap_sm(area, sd, n, p, ne = ne, nobs = nobs)
     cat(sprintf("\n===== %s  (prevalence %.1f%%) =====\n", out, dd$grand * 100))
-    # v1.5.0 cell-size diagnostic (the basis of the stratum-design rule)
-    N <- sum(n); K <- length(n)
+    # v1.5.0 cell-size diagnostic (the basis of the stratum-design rule), on the
+    # individuals observed in each cell
+    N <- sum(n_obs); K <- length(n_obs)
     A_n <- length(unique(area)); S_n <- length(unique(sd)); grid <- A_n * S_n
-    pct <- function(k) sprintf("%d cells (%.1f%%), %.0f individuals (%.1f%%)", sum(k), 100 * mean(k), sum(n[k]), 100 * sum(n[k]) / N)
+    pct <- function(k) sprintf("%d cells (%.1f%%), %.0f individuals (%.1f%%)", sum(k), 100 * mean(k), sum(n_obs[k]), 100 * sum(n_obs[k]) / N)
     cat(sprintf("  cell-size diagnostic: %d occupied of %d area x stratum cells (%d empty); median n = %.0f, min n = %.0f\n",
-                K, grid, grid - K, median(n), min(n)))
-    cat(sprintf("    n < 5   : %s\n", pct(n < 5)))
-    cat(sprintf("    n < 10  : %s\n", pct(n < 10)))
-    cat(sprintf("    n < 30  : %s\n", pct(n < 30)))
+                K, grid, grid - K, median(n_obs), min(n_obs)))
+    cat(sprintf("    n < 5   : %s\n", pct(n_obs < 5)))
+    cat(sprintf("    n < 10  : %s\n", pct(n_obs < 10)))
+    cat(sprintf("    n < 30  : %s\n", pct(n_obs < 30)))
     cat(sprintf("    no events (p = 0)  : %s\n", pct(ev == 0)))
     cat(sprintf("    all events (p = 1) : %s\n", pct(ev == n)))
+    if (!is.null(ne))
+      cat(sprintf("  weights: n_ef median = %.1f, min = %.1f; n_ef/n median = %.3f, min = %.3f; mean design effect n/n_ef = %.3f; cells with n_ef < %d: %d (minn applies to n)\n",
+                  median(ne), min(ne), median(ne / n_obs), min(ne / n_obs), mean(n_obs / ne), MINN, sum(ne < MINN)))
     cat(sprintf("  identity weighted : %.8f vs %.8f\n", cf$ident_w, cf$den_w))
     cat(sprintf("  identity standard.: %.8f vs %.8f\n", cf$ident_s, cf$den_s))
-    dv <- deviations_sm(area, n, ev)
+    dv <- deviations_sm(area, n, ev, ne = ne)
     cat(sprintf("  STEP 4 deviations (Wilson shift): %d of %d significant; range %.3f to %.3f\n",
                 sum(dv$sig), length(dv$sig), min(dv$dev), max(dv$dev)))
     if (dd$K_std < dd$K_all)
-      cat(sprintf("  standardised measures use %d of %d cells (n >= %d); %d cells and %.0f individuals excluded\n",
-                  dd$K_std, dd$K_all, MINN, dd$K_all - dd$K_std, dd$N_excl))
+      cat(sprintf("  standardised measures use %d of %d cells (%s >= %d); %d cells and %.0f individuals excluded\n",
+                  dd$K_std, dd$K_all, "n", MINN, dd$K_all - dd$K_std, dd$N_excl))
     line <- function(name, val, key)
       cat(sprintf("  %-26s %6.2f%%  (%.2f to %.2f)\n", name, val * 100,
                   ci[1, key] * 100, ci[2, key] * 100))
@@ -455,9 +600,9 @@ main <- function() {
     cat(sprintf("  strata flagged high-risk    = %d\n", cl$n_flag))
     cat(sprintf("  sensitivity / specificity   = %.1f%% / %.1f%%\n", cl$sens * 100, cl$spec * 100))
     cat(sprintf("  positive predictive value   = %.1f%%\n", cl$ppv * 100))
-    cat(sprintf("  TP / FP / FN / TN (indiv.)  = %.0f / %.0f / %.0f / %.0f\n",
-                cl$TP, cl$FP, cl$FN, cl$TN))
-    tw <- three_way(area, sd, n, p)
+    cat(sprintf("  TP / FP / FN / TN %s = %.0f / %.0f / %.0f / %.0f\n",
+                if (is.null(ne)) "(indiv.) " else "(weight.)", cl$TP, cl$FP, cl$FN, cl$TN))
+    tw <- three_way(area, sd, n, p, ne = ne, nobs = nobs)
     cat("  contextual decomposition (standardised; CMI noise-corrected):\n")
     cat(sprintf("    CCI  clustering    = %5.1f%%  (%.1f to %.1f)\n", tw["CCI"], ci[1, "CCI"], ci[2, "CCI"]))
     cat(sprintf("    G    additive      = %5.1f%%  (%.1f to %.1f)\n", tw["G"],   ci[1, "G"],   ci[2, "G"]))

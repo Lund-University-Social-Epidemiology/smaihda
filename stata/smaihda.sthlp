@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 1.9.0  06oct2026}{...}
+{* *! version 1.10.0  16oct2026}{...}
 {cmd:help smaihda}
 {hline}
 
@@ -30,6 +30,10 @@ stratum{p_end}
 {syntab :Data}
 {synopt :{cmd:n(}{it:varname}{cmd:)}}the data are a stratum table: {it:outcome} holds the
 number of cases and {it:varname} the number of individuals of each row{p_end}
+{synopt :{cmd:weights(}{it:spec}{cmd:)}}survey weights (v1.10.0): one weight variable
+with individual records; with {cmd:n()}, the sum of weights, the weighted cases and
+the sums of squared weights over the cases and over the non-cases of each row, or
+their common prefix{p_end}
 
 {syntab :Optional}
 {synopt :{cmd:areacovar(}{it:varname}{cmd:)}}area-level covariate (binary)
@@ -129,6 +133,48 @@ inside {cmd:preserve} and runs as usual, so the results are those of the
 individual records and the data in memory do not change. Without {cmd:n()} the
 data are individual records. From individual records the table is one line:
 {cmd:collapse (count) n=}{it:y} {cmd:(sum) cases=}{it:y}{cmd:, by(}{it:area stratum}{cmd:)}.
+
+{phang}
+{cmd:weights(}{it:spec}{cmd:)} (new in version 1.10.0) runs the analysis with
+survey weights. With individual records, {it:spec} is the weight variable. With
+a stratum table ({cmd:n()}), {it:spec} is four variables, the sum of the weights,
+the weighted number of cases, the sum of the squared weights over the cases and
+the sum of the squared weights over the non-cases of each row, in that order, or
+a prefix {it:p} for the variables {it:p}{cmd:_sum}, {it:p}{cmd:_cases},
+{it:p}{cmd:_sq_cases} and {it:p}{cmd:_sq_noncases}. From individual records the
+four sums are {cmd:gen wy = w*}{it:y}, {cmd:gen w2y = w^2*}{it:y} and
+{cmd:gen w2n = w^2*(1-}{it:y}{cmd:)}, then
+{cmd:collapse (count) n=}{it:y} {cmd:(sum) cases=}{it:y} {cmd:w_sum=w w_cases=wy w_sq_cases=w2y w_sq_noncases=w2n, by(}{it:area stratum}{cmd:)}.
+
+{pmore}
+With weights the size of a cell has two roles, and the command separates them.
+For composition, a cell enters every weighted mean (the crude proportions of the
+area and of the population, the crude VPC, the AUC and the classification) with
+the sum of its weights, rescaled so that the sizes add up to the number of
+individuals observed; its proportion is the weighted proportion. For noise, the
+binomial variance of a weighted proportion is p(1-p)/n_ef, where n_ef is its
+effective size by linearisation, p(1-p)/Var(p), with
+Var(p) = [(1-p)^2 S1 + p^2 S0]/(sum w)^2 and S1 and S0 the sums of the squared
+weights over the cases and the non-cases. It carries the inequality of the
+weights and their association with the outcome. In a cell with no cases or no
+non-cases Var(p) is zero, and n_ef falls back on Kish's (sum w)^2/(sum w^2).
+n_ef replaces n in the noise term of the corrected components, in the Wilson
+interval of every cell and in the binomial draws of the bootstrap,
+Binomial(round(n_ef), p). The contexts stay fixed and only the individuals are
+resampled, as without weights. The {cmd:minn()} rule applies to the number of
+individuals observed, as without weights, so that the weighted analysis keeps
+the cells of the unweighted one and no cell enters and leaves the standardised
+block between replicates; the smaller information of a weighted cell enters
+through n_ef in the noise term and the intervals. Without weights
+n_ef = n and the command is exactly version 1.9.0. The effective size does not
+capture the clustering or the stratification of the sample design, which would
+need the primary sampling units. With {cmd:weights()} the command prints
+the summary table (Steps 4 to 6) and the n_ef diagnostic; {cmd:compare},
+{cmd:graph}, {cmd:graphdir()}, {cmd:areacovar()} and {cmd:savedir()} are not
+available. The Python and R implementations, version 1.10.0, have the same
+option ({cmd:weights=}) and the same arithmetic. Stored results add
+{cmd:r(neff_median)}, {cmd:r(neff_min)}, {cmd:r(deff_mean)}, {cmd:r(K_std)} and
+{cmd:r(weights)}.
 
 {phang}
 {cmd:area(}{it:varname}{cmd:)} specifies the geographical or institutional

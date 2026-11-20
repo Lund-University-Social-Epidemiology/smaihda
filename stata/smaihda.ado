@@ -1,3 +1,38 @@
+*! version 1.10.0   16oct2026   EXECUTED IN STATA by Raquel Perez-Vicente, October 2026
+*! 16oct2026 (v1.10.0): survey weights, as an option. It is the only difference
+*!   from v1.9.0; without weights() the command runs the v1.9.0 code unchanged and
+*!   every number is the v1.9.0 number. With weights() the size of a cell has two
+*!   roles, and they are separated.
+*!   - Composition. A cell enters every weighted mean (the crude proportions of the
+*!     area and of the population, the crude VPC, the AUC, the classification)
+*!     with the sum of its weights, rescaled so that the sizes add up to the
+*!     analytical N. Its proportion is sum(w*y)/sum(w).
+*!   - Noise. The binomial noise of a weighted proportion is p(1-p)/n_ef, where
+*!     n_ef is its effective size by linearisation, p(1-p)/Var(p), with
+*!     Var(p) = [(1-p)^2 * sum_cases w^2 + p^2 * sum_noncases w^2] / (sum w)^2.
+*!     It carries the inequality of the weights and their association with the
+*!     outcome. In a cell with no cases or no non-cases it falls back on Kish's
+*!     (sum w)^2/sum(w^2). n_ef replaces n in the noise term of the corrected
+*!     components, in the Wilson interval of every cell (Step 4), and in the
+*!     binomial draws of the within-context bootstrap, Binomial(round(n_ef), p).
+*!   - The minn() rule applies to the individuals observed, n, as without
+*!     weights, so that the sensitivity analysis keeps the cells of the main
+*!     one and no cell enters and leaves the standardised block between
+*!     replicates; the smaller information of a weighted cell enters through
+*!     n_ef in the noise term and the intervals.
+*!   n_ef does not capture clustering or stratification of the sample design.
+*!   Syntax. Individual records: weights(wvar). Stratum table, with n():
+*!   weights(sumvar casesvar sq1var sq0var), or weights(prefix) for the variables
+*!   prefix_sum, prefix_cases, prefix_sq_cases and prefix_sq_noncases (sums of
+*!   squared weights over the cases and the non-cases). The weighted analysis is the new
+*!   program _smaihda_wrun, which builds the table of cells and computes every
+*!   measure with _smaihda_compute_cells, the helper of the bootstrap, which takes
+*!   the effective size and the observed size as optional seventh and eighth
+*!   arguments. With weights() the
+*!   output is the summary table (Steps 4 to 6); compare, graph, areacovar() and
+*!   savedir() are not available. Same option and same arithmetic as the Python
+*!   and R implementations v1.10.0. _smaihda_compute_cells also returns
+*!   r(VPC_A_s), r(VPC_SD_s), r(VPC_A_c) and r(VPC_SD_c); no value changes.
 *! version 1.9.0   06oct2026
 *! 06oct2026 (v1.9.0): coAUC*EAR, the area-level contextual AUC
 *!   standardised for size and composition. The area-level coAUC* (auc_area_std)
@@ -388,7 +423,14 @@
 * ==================================================================
 program define smaihda, rclass
     version 14.0
-    syntax varname(numeric) [if] [in] [, N(varname numeric) *]
+    syntax varname(numeric) [if] [in] [, N(varname numeric) WEIghts(string) *]
+    * v1.10.0: with weights() the weighted analysis runs on the table of cells
+    if `"`weights'"' != "" {
+        if "`n'" != "" local _nopt "n(`n')"
+        _smaihda_wrun `varlist' `if' `in', `_nopt' weights(`weights') `options'
+        return add
+        exit
+    }
     if "`n'" == "" {
         _smaihda_run `varlist' `if' `in', `options'
         return add
@@ -559,7 +601,7 @@ program define _smaihda_run, rclass
     * --------------------------------------------------------------
     if "`nodisplay'" == "" {
         display _newline as text "{hline 70}"
-        display as text "Simple-means MAIHDA (smaihda v1.9.0)"
+        display as text "Simple-means MAIHDA (smaihda v1.10.0)"
         display as text "{hline 70}"
         display as text "Design:                 " as result "`_modelabel'"
         display as text "Outcome:                " as result "`outcome'"
@@ -1721,6 +1763,399 @@ program define _smaihda_run, rclass
 end
 
 * ==================================================================
+* v1.10.0: the weighted analysis, option weights()
+* ------------------------------------------------------------------
+* Builds the table of A-SD cells with, for every cell, the individuals
+* observed (n_obs), the cases observed, the sum of the weights, the weighted
+* cases and the sums of the squared weights over the cases (S1) and the
+* non-cases (S0). Then
+*   p      = weighted cases / sum of weights
+*   n      = sum of weights rescaled to the analytical N (composition)
+*   events = p * n
+*   ne     = p(1-p) / Var(p), Var(p) = [(1-p)^2*S1 + p^2*S0] / W^2, the
+*            effective size by linearisation (noise); Kish's W^2/(S1+S0)
+*            in a cell with no cases or no non-cases
+* and computes every measure with _smaihda_compute_cells, which uses n for
+* the weighted means, ne for the binomial noise and n_obs for the minn() rule.
+* The Wilson interval of every cell uses ne. The bootstrap keeps the
+* contexts fixed and draws the events of every cell from
+* Binomial(round(ne), p), as in the Python and R implementations v1.10.0.
+* ==================================================================
+program define _smaihda_wrun, rclass
+    version 14.0
+    syntax varname(numeric) [if] [in] , WEIghts(string) [ ///
+        N(varname numeric)                    ///
+        AREA(varname numeric)                 ///
+        SDstratum(varname numeric)            ///
+        AREACOVar(varname numeric)            ///
+        THReshold(real -1)                    ///
+        Bootstrap(integer 2000)               ///
+        SEED(integer 2026)                    ///
+        MINN(integer 10)                      ///
+        Components(string)                    ///
+        SAVEdir(string)                       ///
+        COMPare                               ///
+        GRaph                                 ///
+        GRAPHDir(string)                      ///
+        NODisplay]
+
+    if "`compare'`graph'`graphdir'`areacovar'`savedir'" != "" {
+        display as error "compare, graph, graphdir(), areacovar() and savedir() are not available with weights()"
+        exit 198
+    }
+    if "`area'" == "" & "`sdstratum'" == "" {
+        display as error "specify area() and/or sdstratum()"
+        exit 198
+    }
+    marksample touse
+    if "`n'" != "" markout `touse' `n'
+    local outcome `varlist'
+    global smaihda_flag ""
+
+    * --- the weight variables ---
+    local nw : word count `weights'
+    if "`n'" != "" {
+        if `nw' == 1      local wv "`weights'_sum `weights'_cases `weights'_sq_cases `weights'_sq_noncases"
+        else if `nw' == 4 local wv "`weights'"
+        else {
+            display as error "with n(), weights() takes four variables (sum of weights, weighted cases, sum of squared weights over the cases and over the non-cases) or one prefix"
+            exit 198
+        }
+    }
+    else {
+        if `nw' != 1 {
+            display as error "with individual records, weights() takes one variable"
+            exit 198
+        }
+        local wv "`weights'"
+    }
+    foreach v of local wv {
+        capture confirm numeric variable `v'
+        if _rc {
+            display as error "weights(): numeric variable `v' not found"
+            exit 111
+        }
+    }
+    markout `touse' `wv'
+    quietly count if `touse'
+    if r(N) == 0 {
+        display as error "no observations meet the if/in restrictions"
+        exit 2000
+    }
+    if "`n'" == "" {
+        capture assert inlist(`outcome', 0, 1) if `touse'
+        if _rc {
+            display as error "outcome `outcome' must be binary (0/1)"
+            exit 198
+        }
+    }
+
+    local _orig_ls = c(linesize)
+    capture quietly set linesize 120
+
+    preserve
+    quietly keep if `touse'
+
+    * --- design mode, as in _smaihda_run ---
+    tempvar one
+    if "`area'" == "" {
+        quietly gen byte `one' = 1
+        local area       `one'
+        local _mode      "intersectional"
+        local _modelabel "Two-level MAIHDA (individuals within contexts)"
+    }
+    else if "`sdstratum'" == "" {
+        quietly gen byte `one' = 1
+        local sdstratum  `one'
+        local _mode      "geographical"
+        local _modelabel "Two-level MAIHDA (individuals within contexts)"
+    }
+    else {
+        local _mode      "three-level"
+        local _modelabel "Three-level (A-SD strata within areas)"
+    }
+
+    * --- the table of cells ---
+    tempvar nob kob W WY S1 S0
+    if "`n'" != "" {
+        quietly keep if `n' > 0
+        local w1 : word 1 of `wv'
+        local w2 : word 2 of `wv'
+        local w3 : word 3 of `wv'
+        local w4 : word 4 of `wv'
+        quietly gen double `nob' = `n'
+        quietly gen double `kob' = `outcome'
+        quietly gen double `W'   = `w1'
+        quietly gen double `WY'  = `w2'
+        quietly gen double `S1'  = `w3'
+        quietly gen double `S0'  = `w4'
+    }
+    else {
+        quietly gen double `nob' = 1
+        quietly gen double `kob' = `outcome'
+        quietly gen double `W'   = `wv'
+        quietly gen double `WY'  = `wv' * `outcome'
+        quietly gen double `S1'  = `wv'^2 * `outcome'
+        quietly gen double `S0'  = `wv'^2 * (1 - `outcome')
+    }
+    quietly collapse (sum) `nob' `kob' `W' `WY' `S1' `S0', by(`area' `sdstratum')
+    capture assert `W' > 0 & (`S1' + `S0') > 0
+    if _rc {
+        display as error "weights(): every cell needs a positive sum of weights"
+        exit 459
+    }
+    quietly summarize `nob', meanonly
+    local N_total = r(sum)
+    quietly summarize `W', meanonly
+    local W_tot = r(sum)
+    quietly gen double p      = `WY' / `W'
+    quietly gen double n      = `W' / `W_tot' * `N_total'
+    quietly gen double events = p * n
+    * effective size by linearisation: n_ef = p(1-p)/Var(p), with
+    * Var(p) = [(1-p)^2*S1 + p^2*S0]/W^2; in a cell with no cases or no
+    * non-cases (in individuals) Var(p) is zero and n_ef is Kish's W^2/(S1+S0)
+    quietly gen double ne     = `W'^2 / (`S1' + `S0')
+    quietly replace ne = p*(1 - p) / (((1 - p)^2*`S1' + p^2*`S0') / `W'^2) ///
+        if `kob' > 0 & `kob' < `nob'
+    quietly gen double n_obs  = `nob'
+    sort `area' `sdstratum'
+
+    quietly summarize events, meanonly
+    local pop_prev = r(sum) / `N_total'
+    if `threshold' < 0 local threshold = `pop_prev'
+    quietly count
+    local K_all = r(N)
+    quietly count if n_obs >= `minn'
+    local K_std = r(N)
+    quietly summarize n if n_obs < `minn', meanonly
+    local N_excl = cond(r(N) > 0, r(sum), 0)
+    quietly summarize ne, detail
+    local ne_med = r(p50)
+    local ne_min = r(min)
+    tempvar rat def
+    quietly gen double `rat' = ne / n_obs
+    quietly summarize `rat', detail
+    local rat_med = r(p50)
+    local rat_min = r(min)
+    quietly gen double `def' = n_obs / ne
+    quietly summarize `def', meanonly
+    local deff = r(mean)
+    quietly count if ne < `minn'
+    local K_small = r(N)
+    quietly levelsof `area', local(_al)
+    local n_areas : word count `_al'
+    quietly levelsof `sdstratum', local(_sl)
+    local n_sd : word count `_sl'
+
+    * --- Step 4: Wilson interval of every cell with its effective size ---
+    tempvar kef pa_n pa_e pa sig dv
+    quietly gen double `kef' = p * ne
+    quietly _smaihda_wilson ne `kef'
+    quietly bysort `area': egen double `pa_n' = total(n)
+    quietly by `area': egen double `pa_e' = total(events)
+    quietly gen double `pa' = `pa_e' / `pa_n'
+    quietly gen double `dv' = p - `pa'
+    quietly gen byte `sig' = (_wlo - `pa' > 0) | (_whi - `pa' < 0)
+    quietly count if `sig'
+    local n_sig = r(N)
+    quietly summarize `dv'
+    local dev_min = r(min)
+    local dev_max = r(max)
+    drop _wp _wlo _whi
+
+    * --- classification at the threshold, in weighted individuals ---
+    tempvar hr non
+    quietly gen double `non' = n - events
+    quietly gen byte `hr' = (p >= `threshold')
+    quietly summarize events if `hr', meanonly
+    local TP = r(sum)
+    quietly summarize `non' if `hr', meanonly
+    local FP = r(sum)
+    quietly summarize events if !`hr', meanonly
+    local FN = r(sum)
+    quietly summarize `non' if !`hr', meanonly
+    local TN = r(sum)
+    quietly count if `hr'
+    local n_flag = r(N)
+    local Sens = cond(`TP' + `FN' > 0, `TP' / (`TP' + `FN'), .)
+    local Spec = cond(`TN' + `FP' > 0, `TN' / (`TN' + `FP'), .)
+    local PPV  = cond(`TP' + `FP' > 0, `TP' / (`TP' + `FP'), .)
+
+    * --- point estimates ---
+    sort `area' `sdstratum'
+    quietly _smaihda_compute_cells `area' `sdstratum' n events "`_mode'" `minn' ne n_obs
+    foreach k in GCCI VPC_A VPC_SD ICC_ASD ICC_ASD_s ICC_ASD_c GCCI_s GCCI_c ///
+                 VPC_A_s VPC_SD_s VPC_A_c VPC_SD_c CCI Gshare CMI ///
+                 AUC_asd AUC_area AUC_asd_s AUC_area_s AUC_area_ear {
+        local `k' = r(`k')
+    }
+    local ICC_AS = `ICC_ASD'
+    if "`_mode'" != "three-level" {
+        local GCCI   = .
+        local GCCI_s = .
+        local GCCI_c = .
+    }
+
+    * --- within-context bootstrap, Binomial(round(ne), p) per cell ---
+    local _blist GCCI VPC_A VPC_SD ICC_AS AUC_asd AUC_area ICC_ASD_s ICC_ASD_c ///
+                 GCCI_s GCCI_c CMI CCI Gshare AUC_asd_s AUC_area_s AUC_area_ear
+    foreach v of local _blist {
+        local `v'_lo = .
+        local `v'_hi = .
+    }
+    if `bootstrap' > 0 {
+        if "`nodisplay'" == "" {
+            display as text "Within-context bootstrap (B = `bootstrap', seed = `seed'), the cases of each cell"
+            display as text "redrawn from Binomial(round(n_ef), p). Please wait..."
+        }
+        tempname br
+        matrix `br' = J(`bootstrap', 16, .)
+        tempvar p0 nei evb
+        quietly gen double `p0'  = p
+        quietly gen double `nei' = round(ne)
+        quietly gen double `evb' = events
+        set seed `seed'
+        forval b = 1/`bootstrap' {
+            sort `area' `sdstratum'
+            quietly replace `evb' = n * rbinomial(`nei', `p0') / `nei' if `p0' > 0 & `p0' < 1
+            quietly _smaihda_compute_cells `area' `sdstratum' n `evb' "`_mode'" `minn' ne n_obs
+            matrix `br'[`b', 1]  = r(GCCI)
+            matrix `br'[`b', 2]  = r(VPC_A)
+            matrix `br'[`b', 3]  = r(VPC_SD)
+            matrix `br'[`b', 4]  = r(ICC_ASD)
+            matrix `br'[`b', 5]  = r(AUC_asd)
+            matrix `br'[`b', 6]  = r(AUC_area)
+            matrix `br'[`b', 7]  = r(ICC_ASD_s)
+            matrix `br'[`b', 8]  = r(ICC_ASD_c)
+            matrix `br'[`b', 9]  = r(GCCI_s)
+            matrix `br'[`b', 10] = r(GCCI_c)
+            matrix `br'[`b', 11] = r(CMI)
+            matrix `br'[`b', 12] = r(CCI)
+            matrix `br'[`b', 13] = r(Gshare)
+            matrix `br'[`b', 14] = r(AUC_asd_s)
+            matrix `br'[`b', 15] = r(AUC_area_s)
+            matrix `br'[`b', 16] = r(AUC_area_ear)
+        }
+        * percentile interval recentred on the estimate, truncated to [0, 1]
+        quietly clear
+        quietly svmat `br', names(col)
+        local j = 0
+        foreach v of local _blist {
+            local ++j
+            capture quietly _pctile c`j', percentiles(2.5 97.5)
+            if _rc | missing(``v'') continue
+            local _q_lo = r(r1)
+            local _q_hi = r(r2)
+            quietly summarize c`j', meanonly
+            if missing(r(mean)) continue
+            local `v'_lo = max(``v'' + (`_q_lo' - r(mean)), 0)
+            local `v'_hi = min(``v'' + (`_q_hi' - r(mean)), 1)
+        }
+    }
+    restore
+
+    * --- display ---
+    if "`nodisplay'" == "" {
+        display _newline as text "{hline 70}"
+        display as text "Simple-means MAIHDA (smaihda v1.10.0), survey weights"
+        display as text "{hline 70}"
+        display as text "Design:                 " as result "`_modelabel'"
+        display as text "Outcome:                " as result "`outcome'"
+        display as text "Weights:                " as result "`wv'"
+        display as text "Individuals observed:   " as result %9.0f `N_total'
+        display as text "Areas / SD strata:      " as result `n_areas' as text " / " as result `n_sd'
+        display as text "A-SD cells:             " as result `K_all'
+        display as text "Weighted prevalence:    " as result %6.4f `pop_prev'
+        display as text "Threshold:              " as result %6.4f `threshold'
+        display as text "n_ef (linearised):      median " as result %7.1f `ne_med' ///
+            as text ", min " as result %7.1f `ne_min'
+        display as text "n_ef / n:               median " as result %6.3f `rat_med' ///
+            as text ", min " as result %6.3f `rat_min' ///
+            as text "; mean design effect " as result %6.3f `deff'
+        display as text "Cells with n_ef < `minn':   " as result `K_small' as text " (minn() applies to n)"
+        display as text "{hline 70}"
+        display as text "STEP 4: deviations (Wilson shift, n_ef): " as result `n_sig' ///
+            as text " of " as result `K_all' as text " significant; range " ///
+            as result %6.3f `dev_min' as text " to " as result %6.3f `dev_max'
+        if `K_std' < `K_all' {
+            local _kx = `K_all' - `K_std'
+            display as text "Standardised measures use " as result `K_std' as text " of " ///
+                as result `K_all' as text " cells (n >= `minn'); " as result `_kx' ///
+                as text " cells and " as result %9.0f `N_excl' as text " weighted individuals excluded."
+        }
+        display as text "{hline 70}"
+        display as text "{col 5}Quantity{col 28}Estimate{col 45}95% CI"
+        display as text "{hline 70}"
+        foreach row in "VPC area (%)|VPC_A" "VPC SD strata (%)|VPC_SD" "VPC/ICC, crude (%)|ICC_AS" ///
+                       "CCI, crude (%)|GCCI" "VPC/ICC std, uncorr (%)|ICC_ASD_s" ///
+                       "VPC/ICC std, corr (%)|ICC_ASD_c" "CCI std, uncorr (%)|GCCI_s" ///
+                       "CCI std, corr (%)|GCCI_c" "CCI clustering (%)|CCI" ///
+                       "G additive (%)|Gshare" "CMI modification (%)|CMI" {
+            gettoken _lab _key : row, parse("|")
+            local _key = subinstr("`_key'", "|", "", 1)
+            local _e = ``_key''    * 100
+            local _l = ``_key'_lo' * 100
+            local _h = ``_key'_hi' * 100
+            _smaihda_show_row "`_lab'" `_e' `_l' `_h'
+        }
+        _smaihda_show_row "coAUC A-SD strata"   `AUC_asd'      `AUC_asd_lo'      `AUC_asd_hi'
+        _smaihda_show_row "coAUC area"          `AUC_area'     `AUC_area_lo'     `AUC_area_hi'
+        _smaihda_show_row "coAUC* A-SD strata"  `AUC_asd_s'    `AUC_asd_s_lo'    `AUC_asd_s_hi'
+        _smaihda_show_row "coAUC* area (size)"  `AUC_area_s'   `AUC_area_s_lo'   `AUC_area_s_hi'
+        _smaihda_show_row "coAUC*EAR area"      `AUC_area_ear' `AUC_area_ear_lo' `AUC_area_ear_hi'
+        display as text _col(5) "Sensitivity (%)" _col(28) as result %6.1f `Sens'*100
+        display as text _col(5) "Specificity (%)" _col(28) as result %6.1f `Spec'*100
+        display as text _col(5) "PPV (%)"         _col(28) as result %6.1f `PPV'*100
+        display as text _col(5) "Strata flagged high-risk" _col(50) as result %8.0f `n_flag'
+        display as text _col(5) "TP / FP / FN / TN (weighted)" _col(40) as result ///
+            %8.0f `TP' " / " %8.0f `FP' " / " %8.0f `FN' " / " %8.0f `TN'
+        display as text "{hline 70}"
+        if "$smaihda_flag" == "1" {
+            display as text "(!) point estimate outside its percentile interval; report the point"
+            display as text "    estimate and state the limitation."
+        }
+    }
+    macro drop smaihda_flag
+
+    * --- stored results ---
+    return scalar N         = `N_total'
+    return scalar n_areas   = `n_areas'
+    return scalar n_sd      = `n_sd'
+    return scalar n_asd     = `K_all'
+    return scalar pop_prev  = `pop_prev'
+    return scalar threshold = `threshold'
+    return scalar K_all     = `K_all'
+    return scalar K_std     = `K_std'
+    return scalar neff_median = `ne_med'
+    return scalar neff_min    = `ne_min'
+    return scalar deff_mean   = `deff'
+    foreach k in GCCI VPC_A VPC_SD ICC_ASD_s ICC_ASD_c GCCI_s GCCI_c CCI Gshare CMI ///
+                 AUC_asd AUC_area AUC_asd_s AUC_area_s AUC_area_ear {
+        return scalar `k'    = ``k''
+        return scalar `k'_lo = ``k'_lo'
+        return scalar `k'_hi = ``k'_hi'
+    }
+    return scalar ICC_ASD    = `ICC_AS'
+    return scalar ICC_ASD_lo = `ICC_AS_lo'
+    return scalar ICC_ASD_hi = `ICC_AS_hi'
+    foreach k in VPC_A_s VPC_SD_s VPC_A_c VPC_SD_c {
+        return scalar `k' = ``k''
+    }
+    return scalar sensitivity = `Sens'
+    return scalar specificity = `Spec'
+    return scalar ppv         = `PPV'
+    return scalar n_flag      = `n_flag'
+    return scalar TP = `TP'
+    return scalar FP = `FP'
+    return scalar FN = `FN'
+    return scalar TN = `TN'
+    return local cmd       "smaihda"
+    return local outcome   "`outcome'"
+    return local weights   "`wv'"
+    capture quietly set linesize `_orig_ls'
+end
+
+* ==================================================================
 * Helper: Wilson 95% CI computed in-dataset
 * Adds variables _wp, _wlo, _whi to the working dataset
 * Requires variables `n' and `events' to exist
@@ -2045,10 +2480,16 @@ end
 * cases. Every measure is computed from the two counts of each cell, with
 * the formulas that _smaihda_compute applies to the observed cells. Used
 * by the within-context bootstrap, which redraws the cases of each cell.
-* args: area_var sd_var n_var ev_var cmode minn
+* args: area_var sd_var n_var ev_var cmode minn [ne_var] [nm_var]
+* v1.10.0: the optional ne_var is the effective size of every cell,
+* used for the binomial noise; the optional nm_var is the number of
+* individuals observed, used for the minn rule; n_var is then the
+* composition size. Without them both sizes are n_var, as in v1.9.0.
 * ==================================================================
 program define _smaihda_compute_cells, rclass
-    args area_var sd_var n_var ev_var cmode minn
+    args area_var sd_var n_var ev_var cmode minn ne_var nm_var
+    if "`ne_var'" == "" local ne_var `n_var'
+    if "`nm_var'" == "" local nm_var `n_var'
 
     tempvar p non n_a ev_a p_a at vb vw vi
     quietly gen double `p'   = `ev_var' / `n_var'
@@ -2081,7 +2522,7 @@ program define _smaihda_compute_cells, rclass
 
     * --- Standardised components: every cell with n >= minn counts once ---
     tempvar big p_as vas vsds nz Sa nzS nz_am ats
-    quietly gen byte `big' = (`n_var' >= `minn')
+    quietly gen byte `big' = (`nm_var' >= `minn')
     quietly count if `big'
     local Kstd = r(N)
     quietly summarize `p' if `big', meanonly
@@ -2093,7 +2534,7 @@ program define _smaihda_compute_cells, rclass
     quietly gen double `vsds' = (`p' - `p_as')^2 if `big'
     quietly summarize `vsds', meanonly
     local V_SD_s = r(sum) / `Kstd'
-    quietly gen double `nz' = `p' * (1 - `p') / `n_var' if `big'
+    quietly gen double `nz' = `p' * (1 - `p') / `ne_var' if `big'
     quietly summarize `nz', meanonly
     local nz_SD = (1 - 1/`Kstd') * r(sum) / `Kstd'
     * three-level design: per-cell factor (1 - 1/S_a), S_a = cells of the area
@@ -2127,6 +2568,11 @@ program define _smaihda_compute_cells, rclass
     local V_SD_c = max(`V_SD_c', 0)
     return scalar ICC_ASD_s = (`V_A_s' + `V_SD_s') / `den_s'
     return scalar ICC_ASD_c = (`V_A_c' + `V_SD_c') / `den_s'
+    return scalar VPC_A_s   = `V_A_s'  / `den_s'
+    return scalar VPC_SD_s  = `V_SD_s' / `den_s'
+    return scalar VPC_A_c   = `V_A_c'  / `den_s'
+    return scalar VPC_SD_c  = `V_SD_c' / `den_s'
+    return scalar K_std     = `Kstd'
     return scalar GCCI_s    = `V_A_s' / (`V_A_s' + `V_SD_s')
     if (`V_A_c' + `V_SD_c') > 0 return scalar GCCI_c = `V_A_c' / (`V_A_c' + `V_SD_c')
     else                        return scalar GCCI_c = .
