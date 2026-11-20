@@ -1,0 +1,67 @@
+cff-version: 1.2.0
+message: "If you use smaihda, please cite the S-MAIHDA preprint given under preferred-citation."
+title: "smaihda: Simple-Means MAIHDA for binary outcomes in Stata, Python and R"
+type: software
+version: 1.9.0
+date-released: 2026-10-06
+license: CC-BY-4.0
+repository-code: "https://github.com/Lund-University-Social-Epidemiology/smaihda"
+abstract: >-
+  smaihda implements the simple-means form of the Multilevel Analysis of
+  Individual Heterogeneity and Discriminatory Accuracy (MAIHDA) for binary
+  outcomes, as a Stata command, a Python script and an R script that give the
+  same point estimates. Version 1.9.0 is the version published with the
+  S-MAIHDA preprint (version 2).
+keywords:
+  - MAIHDA
+  - simple means
+  - variance partition coefficient
+  - discriminatory accuracy
+  - health inequalities
+authors:
+  - family-names: Merlo
+    given-names: Juan
+    orcid: "https://orcid.org/0000-0001-8379-9708"
+  - family-names: Bashir
+    given-names: Nasir Z
+    orcid: "https://orcid.org/0000-0001-7416-7610"
+  - family-names: Rodriguez-Lopez
+    given-names: Merida
+    orcid: "https://orcid.org/0000-0001-8245-0811"
+  - family-names: Khalaf
+    given-names: Kani
+    orcid: "https://orcid.org/0000-0002-6749-7037"
+  - family-names: Öberg
+    given-names: Johan
+    orcid: "https://orcid.org/0000-0002-0701-5155"
+  - family-names: Perez-Vicente
+    given-names: Raquel
+    orcid: "https://orcid.org/0000-0002-6273-1656"
+preferred-citation:
+  type: article
+  title: "Describing health inequalities without distortion: Simple-Means MAIHDA vs Random-Effects MAIHDA"
+  status: preprint
+  journal: medRxiv
+  year: 2026
+  version: "2"
+  doi: 10.64898/2026.08.17.26360592
+  url: "https://doi.org/10.64898/2026.08.17.26360592"
+  authors:
+    - family-names: Merlo
+      given-names: Juan
+      orcid: "https://orcid.org/0000-0001-8379-9708"
+    - family-names: Bashir
+      given-names: Nasir Z
+      orcid: "https://orcid.org/0000-0001-7416-7610"
+    - family-names: Rodriguez-Lopez
+      given-names: Merida
+      orcid: "https://orcid.org/0000-0001-8245-0811"
+    - family-names: Khalaf
+      given-names: Kani
+      orcid: "https://orcid.org/0000-0002-6749-7037"
+    - family-names: Öberg
+      given-names: Johan
+      orcid: "https://orcid.org/0000-0002-0701-5155"
+    - family-names: Perez-Vicente
+      given-names: Raquel
+      orcid: "https://orcid.org/0000-0002-6273-1656"

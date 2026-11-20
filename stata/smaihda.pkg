@@ -1,0 +1,47 @@
+d 'SMAIHDA': module to compute simple-means MAIHDA for binary outcomes
+d
+d  smaihda implements the simple-means form of the Multilevel Analysis
+d  of Individual Heterogeneity and Discriminatory Accuracy (MAIHDA) for
+d  binary outcomes, in two designs: individuals nested in contexts
+d  (two-level), or individuals nested in cross-classified
+d  sociodemographic-by-area strata nested in geographical areas
+d  (three-level). All measures are derived from observed counts
+d  and proportions, without random-effects modelling. The command
+d  computes Wilson 95% CIs for proportions at three levels, EAR-
+d  standardised area proportions, ARD/RR comparisons, stratum
+d  deviations Delta_A,SD, the Contextual Clustering of
+d  Inequalities (CCI, crude and standardised), variance partition
+d  coefficients (VPC) on the probability scale, crude and
+d  standardised (the latter representing the general contextual
+d  effect independent of composition, uncorrected and
+d  noise-corrected), discriminatory
+d  accuracy (AUC, the size-standardised AUC in which every cell
+d  counts once, sensitivity, specificity), and 95% confidence
+d  intervals via a within-context bootstrap that holds the contexts
+d  fixed and resamples individuals within each cell. The data can be
+d  individual records or a stratum table with the number of individuals
+d  and the number of cases of each stratum (option n()).
+d
+d KW: MAIHDA
+d KW: simple means
+d KW: variance partition coefficient
+d KW: VPC
+d KW: discriminatory accuracy
+d KW: standardised AUC
+d KW: health inequalities
+d KW: within-context bootstrap
+d KW: small area analysis
+d
+d Requires: Stata version 14
+d
+d Version: 1.9.0
+d Companion to: Merlo J et al. "Describing health inequalities without
+d distortion: Simple-Means MAIHDA vs Random-Effects MAIHDA." Preprint V.2.
+d Distribution-Date: 20260926
+d
+d Author: Juan Merlo, Unit for Social Epidemiology, Lund University, Sweden
+d Support: email juan.merlo@@med.lu.se
+d
+F smaihda.ado
+F smaihda.sthlp
+F smaihda_v1.9.0_test.do
